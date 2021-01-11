@@ -1,2 +1,2 @@
 # nostalgic
-Backtesting system
+Prototyping a backtesting system. Unstable, APIs will change.
