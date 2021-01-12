@@ -2,7 +2,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 import datetime
 from decimal import Decimal
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 import pandas as pd
 
@@ -30,9 +30,23 @@ class Portfolio:
 
 
 @dataclass
+class Indicator:
+    fn: Callable[[pd.DataFrame], pd.DataFrame]
+    name: Optional[str] = None
+
+    # If an indicator is global, it is available to all signals, regardless of
+    # the instrument.
+    is_global: bool = False
+
+
+@dataclass
 class Instrument:
-    # Data object holding information about an instrument
-    # After filters, indicators and signals are computed, this should be immutable
+    """Data object holding path-independent information for an instrument.
+
+    Filters, indicators and signals are all precomputed and immutable.
+
+    """
+
     symbol: str
     data: pd.DataFrame
     filters: List[pd.Series] = None
@@ -117,7 +131,7 @@ class Broker:
 class Strategy:
     def __init__(self,
             filters: List[Callable],
-            indicators: Dict[str, Callable],
+            indicators: List[Indicator],
             signals: Dict[str, Callable],
             rules: List[Rule]
             ):
@@ -162,8 +176,7 @@ class Strategy:
         for instr in instruments:
             instr.indicators = {}
             for ind in self._indicators:
-                fn = self._indicators[ind]
-                instr.indicators[ind] = fn(instr.data)
+                instr.indicators[ind.name] = ind.fn(instr.data)
 
     def _calculate_signals(self, instruments: List[Instrument]):
         """Calculate signals for given instruments.
