@@ -6,6 +6,7 @@ from typing import List, Dict, Optional
 
 import pandas as pd
 
+IndicatorFn = Callable[[pd.DataFrame], pd.DataFrame]
 
 class HistoricalData:
     # container data type for historical data for one instrument
@@ -31,12 +32,15 @@ class Portfolio:
 
 @dataclass
 class Indicator:
-    fn: Callable[[pd.DataFrame], pd.DataFrame]
+    fn: IndicatorFn
     name: Optional[str] = None
 
     # If an indicator is global, it is available to all signals, regardless of
     # the instrument.
     is_global: bool = False
+
+    # If symbols is set, the indicator is only defined for those symbols.
+    symbols: List[str] = None
 
 
 @dataclass
@@ -146,8 +150,8 @@ class Strategy:
 
     def initialize(self, instruments: List[Instrument], broker: Broker):
         self._calculate_filters(instruments)
-        self._calculate_indicators(instruments)
-        self._calculate_signals(instruments)
+        global_indicators = self._calculate_indicators(instruments)
+        self._calculate_signals(instruments, global_indicators)
         self._instruments = instruments
         self._broker = broker
 
@@ -165,20 +169,33 @@ class Strategy:
             filters_df = pd.concat(instr.filters, axis=1)
             instr.filters.append(filters_df.any(axis=1))
 
-    def _calculate_indicators(self, instruments: List[Instrument]):
+    def _calculate_indicators(self, instruments: List[Instrument]) -> Dict[str, pd.DataFrame]:
         """Calculate indicators for given instruments.
 
         Indicators are path-independent and are precomputed for all instruments
         before the strategy starts running.
 
+        Returns a dict of computed global indicators.
+
         """
+
+        global_indicators = {}
 
         for instr in instruments:
             instr.indicators = {}
             for ind in self._indicators:
-                instr.indicators[ind.name] = ind.fn(instr.data)
+                if ind.symbols and instr.symbol not in ind.symbols:
+                    continue
 
-    def _calculate_signals(self, instruments: List[Instrument]):
+                computed_ind = ind.fn(instr.data)
+                instr.indicators[ind.name] = computed_ind
+
+                if ind.is_global:
+                    global_indicators[ind.name] = computed_ind
+
+        return global_indicators
+
+    def _calculate_signals(self, instruments: List[Instrument], global_indicators: Dict[str, pd.DataFrame] = None):
         """Calculate signals for given instruments.
 
         Signals are path-independent and are precomputed for all instruments
@@ -188,7 +205,7 @@ class Strategy:
         for instr in instruments:
             instr.signals = {}
             for sig_name, fn in self._signals.items():
-                instr.signals[sig_name] = fn(instr.indicators)
+                instr.signals[sig_name] = fn(instr.indicators, global_indicators)
 
     def next(self, date):
         """Run the strategy for a given day.
