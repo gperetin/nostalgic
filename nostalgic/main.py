@@ -131,13 +131,19 @@ class Broker:
             # self._positions[symbol] = (size, price)
             pass
 
+    def open_positions(self):
+        """Returns currently open positions."""
+
+        return self._positions
+
 
 class Strategy:
     def __init__(self,
             filters: List[Callable],
             indicators: List[Indicator],
             signals: Dict[str, Callable],
-            rules: List[Rule]
+            rules: List[Rule],
+            max_open_positions: int = 0
             ):
 
         self._filters = filters
@@ -147,6 +153,7 @@ class Strategy:
 
         self._instruments = None
         self._broker = None
+        self._max_open_positions = max_open_positions
 
     def initialize(self, instruments: List[Instrument], broker: Broker):
         self._calculate_filters(instruments)
@@ -207,6 +214,17 @@ class Strategy:
             for sig_name, fn in self._signals.items():
                 instr.signals[sig_name] = fn(instr.indicators, global_indicators)
 
+    def _position_for(self, symbol: str) -> Optional[int]:
+        """Returns position for a symbol if it exists."""
+
+        open_positions = self._broker.open_positions()
+        return open_positions.get(symbol, None)
+
+    def _num_open_positions(self) -> int:
+        """Returns the number of open positions."""
+
+        return len(self._broker.open_positions())
+
     def next(self, date):
         """Run the strategy for a given day.
 
@@ -224,7 +242,6 @@ class Strategy:
 
                 # If this instrument is filtered out for this date, skip rule evaluation
                 if combined_filter is not None and combined_filter.loc[date]:
-                    print("Skipping {} on {} because it's filtered out.".format(instr.symbol, date))
                     continue
 
                 # Note: date here needs to be datetime object, or str like "2020-12-31"
@@ -235,6 +252,12 @@ class Strategy:
                     rule.set_date(date) # TODO: if we create a rule for each evaluation, should we just pass in the date into the constructor too?
                     actions = rule.evaluate()
                     for action in actions:
+                        if not self._position_for(instr.symbol) and self._num_open_positions() >= self._max_open_positions:
+                            # We don't have a position and we're at or over the limit
+                            # TODO: consider moving this higher up in the stack of for loops, for optimization
+                            continue
+
+
                         fill_price = instr.data.loc[date].close
                         print("[{}] [{}] Would take action {} @ {}".format(
                             date, instr.symbol, action, fill_price
