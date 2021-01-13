@@ -17,7 +17,7 @@ class HistoricalData:
 
 class Action:
     # can be PlaceOrder, CancelOrder, ModifyOrder
-    pass
+    symbol: str
 
 
 @dataclass
@@ -233,7 +233,12 @@ class Strategy:
 
         """
 
+        actions = [] # List of tuples, (rank, action)
         for instr in self._instruments:
+            # If we don't have price data for current date for instrument, skip
+            if date not in instr.data.index:
+                continue
+
             combined_filter = instr.filters[-1] if instr.filters else None
 
             for sig_name, sig_df in instr.signals.items():
@@ -244,28 +249,30 @@ class Strategy:
                 if combined_filter is not None and combined_filter.loc[date]:
                     continue
 
-                # Note: date here needs to be datetime object, or str like "2020-12-31"
                 signal = sig_df.loc[date]
 
                 for rule_class in self._rules:
                     rule = rule_class(instr)
                     rule.set_date(date) # TODO: if we create a rule for each evaluation, should we just pass in the date into the constructor too?
-                    actions = rule.evaluate()
-                    for action in actions:
-                        if not self._position_for(instr.symbol) and self._num_open_positions() >= self._max_open_positions:
-                            # We don't have a position and we're at or over the limit
-                            # TODO: consider moving this higher up in the stack of for loops, for optimization
-                            continue
+                    instr_actions = rule.evaluate()
 
+                    for action in instr_actions:
+                        # Rule doesn't have to know the symbol it is evaluating for, so we assign it here
+                        action.symbol = instr.symbol
+                        actions.append((signal, action))
 
-                        fill_price = instr.data.loc[date].close
-                        print("[{}] [{}] Would take action {} @ {}".format(
-                            date, instr.symbol, action, fill_price
-                        ))
-                        if action.side == "long":
-                            self._broker.buy(instr.symbol, action.quantity, fill_price)
-                        elif action.side == "sell":
-                            self._broker.sell(instr.symbol, action.quantity, fill_price)
+        ranked_actions = sorted(actions, key=lambda elem: elem[0], reverse=True)
+        for rank, action in ranked_actions:
+            if not self._position_for(action.symbol) and self._num_open_positions() >= self._max_open_positions: # We don't have a position and we're at or over the limit
+                continue
+
+            print("[{}] [{}] Would take action {} with rank {}".format(
+                date, action.symbol, action, rank
+            ))
+            if action.side == "long":
+                self._broker.buy(action.symbol, action.quantity, 1.0)
+            elif action.side == "sell":
+                self._broker.sell(action.symbol, action.quantity, 1.0)
 
 
 class Backtest:
