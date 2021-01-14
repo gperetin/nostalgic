@@ -1,1 +1,1 @@
-from .main import Backtest, Broker, Indicator, IndicatorFn, Instrument, PlaceOrder, Rule, Strategy
+from .main import Backtest, Broker, Indicator, IndicatorFn, Instrument, OrderType, PlaceOrder, Rule, Strategy

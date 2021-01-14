@@ -2,6 +2,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 import datetime
 from decimal import Decimal
+from enum import Enum
 import time
 from typing import List, Dict, Optional
 
@@ -16,6 +17,12 @@ class HistoricalData:
     pass
 
 
+class OrderType(Enum):
+    MARKET = 1
+    LIMIT = 2
+    STOP = 3
+
+
 class Action:
     # can be PlaceOrder, CancelOrder, ModifyOrder
     symbol: str
@@ -25,6 +32,10 @@ class Action:
 class PlaceOrder(Action):
     side: str
     quantity: int
+    type_: OrderType
+    price: Optional[Decimal] = None
+    from_fill_price: Optional[Decimal] = None
+    on_fill: List[Action] = None
 
 
 class Portfolio:
@@ -97,10 +108,10 @@ class Rule:
         # implemented here
         pass
 
-    def get_indicators(self):
-        # Returns indicators for current date
-        # implemented here
-        pass
+    def get_indicator(self, name: str) -> pd.DataFrame:
+        """Return the requested indicator up to and including the current date."""
+
+        return self._instrument.indicators[name][:self._current_date]
 
 
 class Broker:
@@ -160,11 +171,47 @@ class Broker:
                 continue
 
             fill_price = instr_data.loc[date].open
-            if action.side == "long":
-                self._buy(action.symbol, action.quantity, fill_price)
-            elif action.side == "sell":
-                self._sell(action.symbol, action.quantity, fill_price)
-            print("Executed action {} @ {}".format(action, fill_price))
+
+            was_filled = False
+            if action.type_ == OrderType.MARKET:
+                if action.side == "long":
+                    self._buy(action.symbol, action.quantity, fill_price)
+                elif action.side == "sell":
+                    self._sell(action.symbol, action.quantity, fill_price)
+                was_filled = True
+            elif action.type_ == OrderType.LIMIT:
+                price_range = (instr_data.loc[date].low, instr_data.loc[date].high)
+
+                if action.side == "long" and price_range[0] < action.price:
+                    self._buy(action.symbol, action.quantity, action.price)
+                    was_filled = True
+                elif action.side == "sell" and price_range[1] > action.price:
+                    self._sell(action.symbol, action.quantity, action.price)
+                    was_filled = True
+            elif action.type_ == OrderType.STOP:
+                price_range = (instr_data.loc[date].low, instr_data.loc[date].high)
+
+                if action.side == "long":
+                    if price_range[1] > action.price:
+                        self._buy(action.symbol, action.quantity, action.price)
+                        was_filled = True
+                else:
+                    if price_range[0] < action.price:
+                        self._sell(action.symbol, action.quantity, action.price)
+                        was_filled = True
+            else:
+                raise ValueError("Invalid order type {}".format(action.type))
+
+            if was_filled:
+                for fill_action in action.on_fill or []:
+                    fill_action.symbol = action.symbol
+                    fill_action.price = fill_price + fill_action.from_fill_price
+                    skipped.append(fill_action)
+
+                print("Executed action {} @ {}".format(action, fill_price))
+            else:
+                skipped.append(action)
+
 
         self._queue = skipped
 
@@ -321,3 +368,6 @@ class Backtest:
         print("Open positions")
         for position in self._broker._positions:
             print("Position: {}, {}".format(position, self._broker._positions[position][0]))
+        print("Outstanding orders: {}")
+        for order in self._broker._queue:
+            print("Order {}".format(order))
