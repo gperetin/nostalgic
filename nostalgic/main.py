@@ -2,6 +2,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 import datetime
 from decimal import Decimal
+import time
 from typing import List, Dict, Optional
 
 import pandas as pd
@@ -104,15 +105,20 @@ class Rule:
 
 class Broker:
     # XXX: dummy implementation, only works for long side ATM
-    def __init__(self, capital: Decimal):
+    def __init__(self, capital: Decimal, instruments: List[Instrument]):
         self._starting_capital = capital
         self._capital = capital
         self._positions = {} # str: tuple(size, price)
+        self._queue: List[Action] = []
 
-    def buy(self, symbol, size, price):
+        self._data: Dict[str, pd.DataFrame] = {}
+        for instr in instruments:
+            self._data[instr.symbol] = instr.data
+
+    def _buy(self, symbol, size, price):
         self._positions[symbol] = (size, price)
 
-    def sell(self, symbol, size, price):
+    def _sell(self, symbol, size, price):
         if symbol in self._positions:
             curr_pos, avg_price = self._positions[symbol]
             pnl = size * price - curr_pos * avg_price
@@ -131,11 +137,36 @@ class Broker:
             # self._positions[symbol] = (size, price)
             pass
 
+    def add_action(self, action: Action):
+        # TODO: come up with a better name for this
+        self._queue.append(action)
+
     def open_positions(self):
         """Returns currently open positions."""
 
         return self._positions
 
+    def run_loop(self, date: datetime.datetime):
+        """Run the daily broker loop (place orders)."""
+
+        skipped = []
+        while self._queue:
+            action = self._queue.pop(0)
+            # TODO: we assume fill price is next day open, which is current day by the time
+            # this code runs
+            instr_data = self._data[action.symbol]
+            if date not in instr_data.index:
+                skipped.append(action)
+                continue
+
+            fill_price = instr_data.loc[date].open
+            if action.side == "long":
+                self._buy(action.symbol, action.quantity, fill_price)
+            elif action.side == "sell":
+                self._sell(action.symbol, action.quantity, fill_price)
+            print("Executed action {} @ {}".format(action, fill_price))
+
+        self._queue = skipped
 
 class Strategy:
     def __init__(self,
@@ -225,13 +256,15 @@ class Strategy:
 
         return len(self._broker.open_positions())
 
-    def next(self, date):
+    def next(self, date: datetime.datetime):
         """Run the strategy for a given day.
 
         Checks all signals on all instruments, and if some triggered, runs the
         rules for those signals.
 
         """
+
+        self._broker.run_loop(date)
 
         actions = [] # List of tuples, (rank, action)
         for instr in self._instruments:
@@ -266,13 +299,10 @@ class Strategy:
             if not self._position_for(action.symbol) and self._num_open_positions() >= self._max_open_positions: # We don't have a position and we're at or over the limit
                 continue
 
-            print("[{}] [{}] Would take action {} with rank {}".format(
+            self._broker.add_action(action)
+            print("[{}] [{}] Added action {} with rank {}".format(
                 date, action.symbol, action, rank
             ))
-            if action.side == "long":
-                self._broker.buy(action.symbol, action.quantity, 1.0)
-            elif action.side == "sell":
-                self._broker.sell(action.symbol, action.quantity, 1.0)
 
 
 class Backtest:
