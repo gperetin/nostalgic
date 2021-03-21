@@ -2,3 +2,7 @@
 
 # nostalgic
 Prototyping a backtesting system. Unstable, APIs will change.
+
+# Tests
+
+Run tests with `python -m pytest tests`

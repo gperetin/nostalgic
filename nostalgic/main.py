@@ -24,6 +24,14 @@ class OrderType(Enum):
 
 
 class Action:
+    """Signal to the broker that something might need to happen.
+
+    Actions are generated in the strategy by evaluating rules and are sent
+    to the broker to signal that there could be something that needs to
+    happen, such as fill or cancel an order.
+
+    """
+
     # can be PlaceOrder, CancelOrder, ModifyOrder
     symbol: str
 
@@ -35,7 +43,35 @@ class PlaceOrder(Action):
     type_: OrderType
     price: Optional[Decimal] = None
     from_fill_price: Optional[Decimal] = None
+    trailing_pct: float = None
     on_fill: List[Action] = None
+    active_since: datetime.datetime = None
+
+    def absolute_price(self, bars: pd.DataFrame) -> Decimal:
+        """Returns the absolute price for this order.
+
+        bars is a DataFrame with bars since this order is active.
+        Since we use bars to compute HWM and LWM, they should not
+        contain the bar that we're processing right now.
+        That's not the current implementation, bars does contain the
+        current bar as well. This is only a problem if the current
+        bar both makes a new high (low) and moves in the opposite
+        direction by trailing_pct percent. We'll take that risk for
+        now, but proper implementation would not include the current
+        bar.
+
+        """
+
+        if self.trailing_pct:
+            # "long" means we're closing a short trade 
+            if self.side == "long":
+                lwm = bars.low.min()
+                return lwm + lwm * self.trailing_pct
+            else:
+                hwm = bars.high.max()
+                return hwm - hwm * self.trailing_pct
+
+        return self.price
 
 
 class Portfolio:
@@ -148,6 +184,22 @@ class Broker:
             # self._positions[symbol] = (size, price)
             pass
 
+    def _next_bar(self, symbol: str, current_bar: datetime.datetime) -> datetime.datetime:
+        """Returns the index of the next bar for which there's data for a given symbol."""
+
+        # TODO: consider wrapping self._data into a type, in which case this
+        # will go in that class
+
+        instr_data = self._data[symbol]
+        if current_bar not in instr_data.index:
+            return None
+        
+        bars_after_current = instr_data[instr_data.index > current_bar]
+        if len(bars_after_current):
+            return bars_after_current.index[0].to_pydatetime()
+
+        return None
+
     def add_action(self, action: Action):
         # TODO: come up with a better name for this
         self._queue.append(action)
@@ -158,20 +210,32 @@ class Broker:
         return self._positions
 
     def run_loop(self, date: datetime.datetime):
-        """Run the daily broker loop (place orders)."""
+        """Run the broker loop for a single bar that starts with `date`.
 
-        skipped = []
+        Executes Actions if there are any.
+
+        """
+
+        # List of actions that will need to be executed on the next bar
+        # We maintain this list because we pop from the queue of actions below.
+        # Alternative is to traverse the list and remove if the action was executed.
+        not_executed = []
+
         while self._queue:
             action = self._queue.pop(0)
             # TODO: we assume fill price is next day open, which is current day by the time
             # this code runs
             instr_data = self._data[action.symbol]
             if date not in instr_data.index:
-                skipped.append(action)
+                not_executed.append(action)
                 continue
 
             fill_price = instr_data.loc[date].open
 
+            # This big if/else block tries to see if an action can be executed (order can
+            # be filled). This could be extracted onto the Order object (or Action)
+            # Inputs: current bar, if it's a relative order, then bars since active
+            # Returns: whether it was filled
             was_filled = False
             if action.type_ == OrderType.MARKET:
                 if action.side == "long":
@@ -191,29 +255,57 @@ class Broker:
             elif action.type_ == OrderType.STOP:
                 price_range = (instr_data.loc[date].low, instr_data.loc[date].high)
 
+                # This is used for trailing stops
+                # The slice access in Pandas in inclusive, so this includes `date`
+                # bar as well
+                # TODO: this currently sends the current bar as well, which is not
+                # what we want
+                bars_since_active = instr_data[action.active_since:date]
+
+                # Price that has to be touched for this order to trigger
+                # In case of an order with fixes price, that is action.price
+                # For trailing orders, it's computed
+                absolute_price = action.absolute_price(bars_since_active)
                 if action.side == "long":
-                    if price_range[1] > action.price:
-                        self._buy(action.symbol, action.quantity, action.price)
+                    if price_range[1] > absolute_price:
+                        self._buy(action.symbol, action.quantity, absolute_price)
                         was_filled = True
                 else:
-                    if price_range[0] < action.price:
-                        self._sell(action.symbol, action.quantity, action.price)
+                    if price_range[0] < absolute_price:
+                        self._sell(action.symbol, action.quantity, absolute_price)
                         was_filled = True
             else:
                 raise ValueError("Invalid order type {}".format(action.type))
 
+            # If the Action was executed, execute `on_fill` actions
             if was_filled:
                 for fill_action in action.on_fill or []:
+                    # TODO: Assigning a symbol here seems like a hack. I think that's because rule
+                    # (where these were created) doesn't know about the symbol it is evaluating,
+                    # seems like it should
                     fill_action.symbol = action.symbol
-                    fill_action.price = fill_price + fill_action.from_fill_price
-                    skipped.append(fill_action)
+
+                    # If this new action has a price relative to the order we just executed
+                    # compute the price here
+                    if fill_action.from_fill_price:
+                        fill_action.price = fill_price + fill_action.from_fill_price
+
+                    # We also have to set the active_since here to be the next bar
+                    fill_action.active_since = self._next_bar(action.symbol, date)
+
+                    if not fill_action.active_since:
+                        # This can happen if the current bar is the last bar in the data series
+                        # In that case, we're not adding this action (Note: not sure if this is
+                        # the best way to handle that)
+                        continue
+
+                    not_executed.append(fill_action)
 
                 print("Executed action {} @ {}".format(action, fill_price))
             else:
-                skipped.append(action)
+                not_executed.append(action)
 
-
-        self._queue = skipped
+        self._queue = not_executed
 
 class Strategy:
     def __init__(self,
@@ -308,6 +400,7 @@ class Strategy:
 
         Checks all signals on all instruments, and if some triggered, runs the
         rules for those signals.
+        Orders actions by the strength of the signal and sends them to broker.
 
         """
 
@@ -343,7 +436,10 @@ class Strategy:
 
         ranked_actions = sorted(actions, key=lambda elem: elem[0], reverse=True)
         for rank, action in ranked_actions:
-            if not self._position_for(action.symbol) and self._num_open_positions() >= self._max_open_positions: # We don't have a position and we're at or over the limit
+            # This is a form of risk management - for thoughts on better way to do this, check
+            # Risk management section in the notes
+            if not self._position_for(action.symbol) and self._num_open_positions() >= self._max_open_positions:
+                # We don't have a position and we're at or over the limit
                 continue
 
             self._broker.add_action(action)
