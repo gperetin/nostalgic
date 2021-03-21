@@ -1,10 +1,9 @@
-from collections.abc import Callable
 from dataclasses import dataclass
 import datetime
 from decimal import Decimal
 from enum import Enum
 import time
-from typing import List, Dict, Optional
+from typing import Callable, List, Dict, Optional
 
 import pandas as pd
 
